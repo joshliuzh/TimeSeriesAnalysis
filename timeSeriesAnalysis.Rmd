@@ -1,0 +1,324 @@
+---
+title: "Time Series Analysis of Sales Growth"
+author: "Josh Liu"
+date: "January 4, 2018"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(astsa)
+library(forecast)
+require(ggplot2)
+require(gridExtra)
+
+
+tsdiagseasonal2<-function (object,gof.lag = 10, ...)
+{
+oldpar <- par(mfrow = c(3, 1))
+on.exit(par(oldpar))
+rs <- object$residuals
+
+p <- as.list(object$call$order)[[2]][1]
+q <- as.list(object$call$order)[[4]][1]
+
+P<-as.list(object$call$seasonal$order)[[2]][1]
+Q<-as.list(object$call$seasonal$order)[[4]][1]
+
+stdres <- rs/sqrt(object$sigma2)
+plot(stdres, type = "h", main = "Standardized Residuals", ylab = "")
+abline(h = 0)
+acf(object$residuals, plot = TRUE, main = "ACF of Residuals", na.action = na.pass)
+nlag <- gof.lag+p+q+P+Q
+pval <- c()
+s<-(1+p+q+P+Q)
+for (i in s:nlag) pval[i] <- Box.test2(rs, i, type = "Ljung-Box",fitdf=p+q+P+Q)$p.value
+plot(1:nlag, pval, xlab = "lag", ylab = "p value", ylim = c(0, 1), main = "p values for Ljung-Box statistic")
+abline(h = 0.05, lty = 2, col = "blue")
+}
+
+Box.test2<-function (x, lag = 1, type = c("Box-Pierce", "Ljung-Box"), fitdf = 0) 
+{
+    if (NCOL(x) > 1) 
+        stop("x is not a vector or univariate time series")
+    DNAME <- deparse(substitute(x))
+    type <- match.arg(type)
+    cor <- acf(x, lag.max = lag, plot = FALSE, na.action = na.pass)
+    n <- sum(!is.na(x))
+    PARAMETER <- lag - fitdf
+    obs <- cor$acf[2:(lag + 1)]
+    if (type == "Box-Pierce") {
+        METHOD <- "Box-Pierce test"
+        STATISTIC <- n * sum(obs^2)
+        PVAL <- 1 - pchisq(STATISTIC, lag - fitdf)
+    }
+    else {
+        METHOD <- "Box-Ljung test"
+        STATISTIC <- n * (n + 2) * sum(1/seq.int(n - 1, n - lag) * 
+            obs^2)
+        PVAL <- 1 - pchisq(STATISTIC, lag - fitdf) # fitdf should be p+q instead of the default 0 in the original code
+    }
+    names(STATISTIC) <- "X-squared"
+    names(PARAMETER) <- "df"
+    structure(list(statistic = STATISTIC, parameter = PARAMETER, 
+        p.value = PVAL, method = METHOD, data.name = DNAME), 
+        class = "htest")
+}
+
+
+```
+
+# Introduction
+
+In this analysis, I will set up two models. In the first model, I will take a look at Graybar's sales data, without taking into consideration external macroeconomic indicators. In the second model, I will use all available variables, including sales data and external macroeconomic indicators.
+
+The data being used were supplied to me on January 3, 2018, by Dennis. The data date back to January 1988, through November 2017.
+```{r}
+dennisdata = read.csv("dennisdata.csv")
+sales = dennisdata[,2]
+plot.ts(sales, xlab = "Time in Months since January 1988", ylab = "Sales", axes = FALSE, main = "Historical Sales of Graybar by Month")
+axis(side = 1, at = seq(0, 360, 12))
+axis(side = 2, at = seq(0, 600, 50))
+axis(side = 4, at = seq(0, 600, 50))
+```
+
+Clearly, sales have been growing since January 1988. There were up-and-downs, but the general pattern is moving upward. Next, I will try to see if it is possible to identify a periodicity of the pattern of monthly sales.
+
+First, monthly sales are to be transformed into sales growth rate. The growth rate during the $T$-th month is given by
+
+$$r = \ln\frac{sales(T)}{sales(T-1)},$$
+
+where $sales(T)$ represents the sales of the $T$-th month, and $\ln$ represents natural logarithm. Note that after transformation, we have the growth rate from February 1988, to November 2017, one less data point than the original data on monthly sales.
+
+```{r}
+salesgrowth = diff(log(sales))
+
+plot.ts(salesgrowth, xlab = "Time in Months since January 1988", ylab = "Sales Growth Rate", axes = FALSE, main = "Historical Sales Growth Rate of Graybar by Month")
+axis(side = 1, at = seq(0, 360, 12))
+axis(side = 2, at = seq(-1, 1, .05))
+axis(side = 4, at = seq(-1, 1, .05))
+```
+
+The plot of growth rate shows a high degree of oscillation. It is my speculation that if we learn how the growth rate oscillates, we may be able to know more about the business/sales cycle, and make more accurate prediction on future sales.
+
+
+# Spectral Analysis
+
+
+Now, I will analyze the sales growth rate with a technique called "spectral analysis". Spectral analysis works like this: it takes a series of time-indexed data as input, applies discrete Fourier transform to these data points, and outputt the weight/density of the frequency of oscillation. It might sound obscure, but this graph will make it more clear:
+
+```{r}
+salesgrowth.per = spec.pgram(salesgrowth, taper=0, log="no", spans = c(10, 10))
+maxsalesspec1 = max(salesgrowth.per$spec)
+maxsalesspec2 = max(salesgrowth.per$spec[salesgrowth.per$freq >.3 & salesgrowth.per$freq < .4])
+maxsalesspec3 = max(salesgrowth.per$spec[salesgrowth.per$freq >0 & salesgrowth.per$freq < .1])
+maxfreq1 = salesgrowth.per$freq[salesgrowth.per$spec == maxsalesspec1]
+maxfreq2 = salesgrowth.per$freq[salesgrowth.per$spec == maxsalesspec2]
+maxfreq3 = salesgrowth.per$freq[salesgrowth.per$spec == maxsalesspec3]
+
+abline(v = maxfreq1, lty = 2)
+abline(v = maxfreq2, lty = 2)
+abline(v = maxfreq3, lty = 2)
+# axis(side = 1, at = round(maxfreq1, 2))
+# axis(side = 1, at = round(maxfreq2, 2))
+# axis(side = 1, at = round(maxfreq3, 2))
+
+```
+
+This graph, called "smoothed periodogram," shows that the maximum spectrums are at the frequencies of 0.42, 0.35, and 0.83 (rounded). Therefore, the most prominent periods of the sales growth rate are `r 1/maxfreq1` , `r 1/maxfreq2`, and `r 1/maxfreq3` (the reciprocal of frequencies). That is to say, sales growth oscillate with the periods 12 months and 3 months. 
+
+
+
+Now, let's take a look at the sample auto-correlation of growth rate:
+
+```{r}
+acf(salesgrowth, 48)
+par(mfrow = c(1, 1))
+acf(salesgrowth, 240)
+pacf(salesgrowth, 150)
+par(mfrow = c(1, 1))
+pacf(salesgrowth, 72)
+```
+
+The autocorrelation chart shows significant correlation at the lags of 1 month, the multiples of 12 months, and $12k\pm1$ month where $k$ is integer. Looking at the autocorrelation chart on a larger range of lags, we notice that it never decays to zero. At the same time, the partial-autocorrelation chart shows a clear cut off at around 60. Therefore, I conclude that the sales growth rate is an autoregression process with a short-term memory no longer than 60 months (5 years).
+
+# Preliminary Conclusion
+
+Periodogram indicates that the sales growth rate follows a periodic pattern, with most prominent periods of 12 months and 3 months. The periodic pattern of 12 months indicates a strong annual seasonality, and the periodic pattern of 3 months indicate a quarterly seasoanlity. Recall that in the model set up by IHS, monthly sales is added together every 3 months, resulting in quarterly sales. The quarterly seasoanlity discovered by the periodogram appears to justify the usage of 3-month moving total.
+
+In the next part, I will use 3-month moving total, i.e. quarterly sales, as unit of analysis. I will also take a look at the model set up by IHS, and attempt to validate it.
+
+# Ordinary Linear Regression
+
+The IHS model is not a purely time-series autoregression model. In addition to sales data, it also employs macroeconomic indicators such as national investment in various sectors, population in employment, etc. All data in IHS's model are quarterly. 
+
+Note that IHS's model's response variable is the first-differenced log sales, i.e. the sales growth rate. I will ignore the transformation for now, and use the sales on its orginal scale as response variable.
+
+First, let's inspect the relationship between sales and several predictory variables:
+
+```{r}
+trainingdf = read.csv("trainingdatabankIHS.csv", header = FALSE)
+colnames(trainingdf) = c("year", "month", "date", "quarter", "sales", "salesP", "rpf", "rpfP", "ee", "eeP", "ce", "ceP", "ipe", "ipeP", "pbs", "pbsP", "deflator", "deflatorP")
+
+testingdf = read.csv("testingdatabankIHS.csv", header = FALSE)
+colnames(testingdf) = c("year", "month", "date", "quarter", "sales", "salesP", "rpf", "rpfP", "ee", "eeP", "ce", "ceP", "ipe", "ipeP", "pbs", "pbsP", "deflator", "deflatorP")
+
+par(mfrow = c(1, 1))
+plot(trainingdf$rpf, trainingdf$sales, xlab = "Private Fixed Nonres Investment", ylab = "Sales", main = "Sales vs Private Fixed Nonresidential Investment", pch = 16)
+# lm1 = lm(sales ~ rpf, data = trainingdf)
+# abline(summary(lm1)$coef[1, 1], summary(lm1)$coef[2, 1])
+
+plot(trainingdf$ee, trainingdf$sales, xlab = "Electrical Equipment Investment", ylab = "Sales", main = "Sales vs Electrical Equipment Investment", pch = 16)
+
+plot(trainingdf$ce, trainingdf$sales, xlab = "Communication Equipment Investment", ylab = "Sales", main = "Sales vs Communication Equipment Investment", pch = 16)
+
+plot(trainingdf$ipe, trainingdf$sales, xlab = "Infomation Processing Equipment Investment", ylab = "Sales", main = "Sales vs Infomation Processing Investment", pch = 16)
+
+plot(trainingdf$pbs, trainingdf$sales, xlab = "Professional and Business Service Employment", ylab = "Sales", main = "Sales vs Professional and Business Service Employment", pch = 16)
+
+plot(trainingdf$month, trainingdf$sales)
+
+par(mfrow = c(1, 1))
+```
+
+The scatter plot above shows there is a very strong linear relationship between `sales` and each of the following predictory variables: `real private fixed nonresidential investment`, `Communication Equipment Investment`, `Infomation Processing Equipment Investment`, and `Professional and Business Service Employment`. Now, I will set up a linear model with data from the training dataset.
+
+
+
+```{r}
+lm1 = lm(I((sales/deflator)) ~ month + rpf + ce + ipe + pbs, data = trainingdf)
+summary(lm1)
+
+# predictedtraining = predict(lm1)
+# plot(trainingdf$sales/trainingdf$deflator, predictedtraining)
+# mean((trainingdf$sales / trainingdf$deflator - predictedtraining) ^ 2)
+
+predictedtesting = predict(lm1, newdata = testingdf)
+plot(testingdf$sales / testingdf$deflator, predictedtesting, xlab = "IHS prediction", ylab = "My Prediction", main = "Josh's Model vs IHS Model", pch = 16)
+
+abline(0, 1, lty = 3)
+
+mean((testingdf$sales / testingdf$deflator - predictedtesting) ^ 2)
+```
+
+The regression model works very well on the training set. It captures the linear relationship between the response variable and the predictory variables. Predicted values based on the training set match nicely with the real value. But when we make prediction based on the training set, the result is consistently lower than the prediction made by IHS. 
+
+Note that the regression model above is an "ARIMAX" model: Autoregression Integrated Moving Average with Exogeneous Predictors. Each observation being a quarter, the residual of each observation is assumed to be uncorrelated. Next, I will apply differencing to data. As a result, residuals of regression will be correlated. Let's see if the new model performs better.
+
+# ARIMAX (Autoregression Integrated Moving Average with Exogeneous Predictors)
+
+[NOTE: This part, as well as all following parts, is incomplete.]
+
+To perform time series analysis with ARIMAX model, the response variable is required to be stationary, meaning (1) as random variables, each data point fluctuates around the same center value, and (2) the variance of each data point is the same. With these two criterion in mind, let's take a look at the quarterly sales data, from the first quarter of 1993, to the third quarter of 2017.
+
+```{r}
+ts.plot(trainingdf$sales, ylab = "Sales", main = "Sales each of Quarter")
+```
+
+Clearly, quarterly sales has been increasing for the last two decades, and it does not seem to have the same mean. What if we take the first difference of quarterly sales?
+
+```{r}
+ts.plot(diff(trainingdf$sales), ylab = "Quarterly Difference of Sales", main = "Difference of Sales each Quarter")
+```
+
+The first difference of quarterly sales appears to be more stable than the sales, but I still see the variance grows bigger over time. Now, I will calculate the quarterly sales growth rate, and see if it appears to follow a stationary process. Recall that the growth rate of the $T$-th period is given by
+
+$$r = \ln\frac{sales(T)}{sales(T-1)},$$
+```{r}
+growthrate = diff(log(trainingdf$sales))
+ts.plot(growthrate, ylab = "Growth Rate of Sales", main = "Growth Rate of Sales by Quarter")
+
+```
+
+Note that the shape of the first difference of log-sales is not very different from the first difference of sales on its original scale. Therefore, I conclude it is not necessary to take the log of sales, before applying differencing. 
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r readingin data}
+trainingdf = read.csv("trainingdatabankIHS.csv", header = FALSE)
+colnames(trainingdf) = c("year", "month", "date", "quarter", "sales", "salesP", "rpf", "rpfP", "ee", "eeP", "ce", "ceP", "ipe", "ipeP", "pbs", "pbsP", "deflator", "deflatorP")
+head(trainingdf)
+
+testingdf = read.csv("testingdatabankIHS.csv", header = FALSE)
+colnames(testingdf) = c("year", "month", "date", "quarter", "sales", "salesP", "rpf", "rpfP", "ee", "eeP", "ce", "ceP", "ipe", "ipeP", "pbs", "pbsP", "deflator", "deflatorP")
+head(testingdf)
+
+dlogsales = diff(log(with(trainingdf, sales / deflator))) # This is the response variable
+x1 = log(with(trainingdf, sales / deflator)) - log(trainingdf$rpf) # This is LOG(Real Sales- 1 QTR LAG) - LOG(Private Fixed Nonresidential Investment - 1 QTR LAG) in IHS's model
+x1 = x1[-1] #  by removing the earliest one, we index it with a one-quarter leg.
+
+x2 = diff(log(trainingdf$ee)) # This is DLOG(Industrial Production - Electrical Equipment, Appliances, Components) 
+
+x3 = diff(log(trainingdf$ce))
+x4 = diff(log(trainingdf$ipe))
+x5 = diff(log(trainingdf$pbs))
+
+trainingdf = cbind(dlogsales, x1, x2, x3, x4, x5)
+pairs(trainingdf)
+lmfit = lm(dlogsales ~ x1 + x2 + x3 + x4 + x5)
+summary(lmfit)
+```
+
+Next, I will apply regression to the historical sales growth. First, let's test if the average of sales growth is zero.
+
+```{r}
+
+Lobatotest<-function(ts,mu0)
+{
+#mu0 is the mean under the null hypothesis
+#in our case, mu0=0
+n<-length(ts)
+numerator<-n*(mean(ts)-mu0)^2
+denominator<-sum((cumsum(ts-mean(ts)))^2)/n^2
+teststat<-numerator/denominator
+{
+if (teststat<28.31)
+print("p-value larger than 10%")
+else 
+{if (teststat<=45.4 ) 
+print("p-value between 5% and 10%")
+}
+}
+if (teststat>45.4)
+print("p-value less than 5%")
+}
+
+Lobatotest(salesgrowth, 0)
+
+
+```
+
+Test result shows that we can reject the zero-mean hypothesis at the 0.1 significance level. For further analysis, I will remove the average from the sales growth rate.
+
+```{r}
+salesgrowthmean = mean(salesgrowth)
+salesgrowth = salesgrowth - salesgrowthmean
+```
+
+Recall that autocorrelation chart shows a gradually tailing off pattern, and the partial-autocorrelation chart shows a cut-off at a lag around 60. Considering the periodogram shows a prominent periodicity at 12 months, I intend to try the multiplicative seasonal autoregression integrated moving average model, denoted by $ARIMA(p, d, q) \times (P, D, Q)_s$, where 
+
+```{r}
+salesgrarima = arima(salesgrowth, order=c(0,1,0), seasonal=list(order=c(4,2,1), period=12)
+)
+
+tsdiagseasonal2(salesgrarima)
+
+```
+
